@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ALTID Demo - 3rd Party Website</title>
+  <style>
+    body { font-family: sans-serif; background: #f7f7f7; margin: 0; padding: 0; }
+    .container { max-width: 500px; margin: 40px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px #0001; padding: 2rem; }
+    .btn { background: #2563eb; color: #fff; border: none; padding: 0.75rem 1.5rem; border-radius: 4px; font-size: 1.1rem; cursor: pointer; }
+    .btn:hover { background: #1e40af; }
+    .jwt-box { margin-top: 2rem; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 4px; padding: 1rem; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Demo: Verify with ALTID</h1>
+    <p>This page simulates a 3rd-party website integrating ALTID identity verification.</p>
+    <button class="btn" id="verifyBtn">Verify with ALTID</button>
+    <div id="jwtResult"></div>
+  </div>
+  <script>
+    // Change this to your actual ALTID frontend URL if needed
+    const ALTID_URL = "http://localhost:5173/?callback=" + encodeURIComponent(window.location.href.split('?')[0]);
+    
+    document.getElementById('verifyBtn').onclick = function() {
+      // Clear any existing token from session storage
+      sessionStorage.removeItem('altid_jwt');
+      window.location.href = ALTID_URL;
+    };
+
+    // Function to get query parameter by name
+    function getQueryParam(name) {
+      return new URLSearchParams(window.location.search).get(name);
+    }
+
+    // Function to remove query parameters from URL without page reload
+    function removeQueryParams() {
+      const url = new URL(window.location);
+      window.history.replaceState({}, '', url.pathname);
+    }
+
+    // Process JWT token if present
+    const jwt = getQueryParam('token');
+    if (jwt) {
+      // Display the JWT token
+      document.getElementById('jwtResult').innerHTML = `
+        <div class="jwt-box">
+          <strong>ALTID JWT Token:</strong><br>
+          <textarea style="width:100%;height:100px;" readonly>${jwt}</textarea>
+        </div>
+      `;
+      
+      // Remove token from URL without reloading the page
+      removeQueryParams();
+      
+      // Clear the token from the page if refreshed
+      window.onbeforeunload = function() {
+        document.getElementById('jwtResult').innerHTML = '';
+      };
+    }
+  </script>
+</body>
+</html>
