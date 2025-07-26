@@ -1,15 +1,27 @@
+import os
+import sys
+import logging
 from flask import Flask, request, jsonify, send_file, redirect
 from flask_cors import CORS
-import os
 from werkzeug.utils import secure_filename
 import tempfile
+from datetime import datetime
+
+# Import config first to set up logging
+from config import JWT_CLAIMS, JWT_EXPIRATION_MINUTES, JWT_ISSUER, MINIMUM_AGE, LOG_LEVEL
+
+# Configure logging for this module
+logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
+
+# Import other modules after logging is configured
 from verification.ocr import extract_text
 from verification.face_match import match_faces
 from verification.extract_photo import extract_photo_from_xml, extract_photo_from_pdf
 from verification.signature_validation import validate_xml_signature, validate_pdf_signature
+from verification.age_verification import extract_dob_from_text, verify_age
 from utils.jwt_utils import issue_token
 from utils.logging_utils import log_failure
-from config import JWT_CLAIMS, JWT_EXPIRATION_MINUTES, JWT_ISSUER
 
 app = Flask(__name__)
 CORS(app)
@@ -39,19 +51,66 @@ def upload_doc():
     with tempfile.TemporaryDirectory(dir='backend/temp') as temp_dir:
         doc_path = os.path.join(temp_dir, filename)
         doc_file.save(doc_path)
-        if ext == '.xml':
+        # Extract text for age verification
+        extracted_text = ''
+        if ext == '.pdf':
+            import PyPDF2
+            try:
+                with open(doc_path, 'rb') as f:
+                    reader = PyPDF2.PdfReader(f)
+                    for page in reader.pages:
+                        extracted_text += page.extract_text() or ''
+            except Exception as e:
+                log_failure(f'Error reading PDF: {str(e)}', {'session_id': session_id})
+                return jsonify({'error': 'Error processing PDF'}), 400
+        elif ext == '.xml':
             if not validate_xml_signature(doc_path):
                 log_failure('Invalid XML signature', {'session_id': session_id})
                 return jsonify({'error': 'Invalid XML signature'}), 400
+            with open(doc_path, 'r', encoding='utf-8') as f:
+                extracted_text = f.read()
+        else:  # For images
+            try:
+                extracted_text = extract_text(doc_path)
+            except Exception as e:
+                log_failure(f'Error extracting text from image: {str(e)}', 
+                           {'session_id': session_id})
+                extracted_text = ''
+
+        # Extract and verify age
+        dob = extract_dob_from_text(extracted_text)
+        if not dob:
+            log_failure('Could not extract date of birth', {'session_id': session_id})
+            return jsonify({'error': 'Could not verify age from document'}), 400
+            
+        is_valid, age, is_minor = verify_age(dob)
+        if not is_valid:
+            log_failure(f'Age verification failed: User is {age} years old (minimum {MINIMUM_AGE})',
+                      {'session_id': session_id, 'age': age, 'is_minor': is_minor})
+            return jsonify({
+                'error': f'Age verification failed: Must be at least {MINIMUM_AGE} years old',
+                'age': age,
+                'is_minor': is_minor
+            }), 403
+            
+        # Store age verification details in session
+        sessions[session_id].update({
+            'age_verified': is_valid,
+            'age': age,
+            'date_of_birth': dob
+        })
+
+        # Extract photo for face matching
+        if ext == '.xml':
             photo = extract_photo_from_xml(doc_path)
         elif ext == '.pdf':
             if not validate_pdf_signature(doc_path):
                 log_failure('Invalid PDF signature', {'session_id': session_id})
                 return jsonify({'error': 'Invalid PDF signature'}), 400
             photo = extract_photo_from_pdf(doc_path)
-        else:
-            log_failure('Unsupported document type', {'session_id': session_id})
-            return jsonify({'error': 'Only Aadhaar Paperless Offline e-KYC XML files are accepted'}), 400
+        else:  # For images
+            photo = doc_file
+
         if photo is None:
             log_failure('Photo extraction failed', {'session_id': session_id})
             return jsonify({'error': 'Photo extraction failed'}), 400
@@ -82,12 +141,17 @@ def upload_selfie():
         if not match_faces(doc_photo_path, selfie_path):
             log_failure('Face match failed', {'session_id': session_id})
             return jsonify({'error': 'Face match failed'}), 401
-        # Issue JWT
-        payload = {
+        # Get age verification status
+        age_verified = sessions[session_id].get('age_verified', False)
+        
+        # Create JWT payload with age verification status
+        # Start with default claims and update with our values
+        payload = {**JWT_CLAIMS}  # Start with default claims
+        payload.update({
             'sub': session_id,
             'iss': JWT_ISSUER,
-            **JWT_CLAIMS
-        }
+            'age_verified': age_verified  # This will override the default False value
+        })
         token = issue_token(payload)
         callback_url = sessions[session_id]['callback_url']
         # Redirect with JWT as query param
